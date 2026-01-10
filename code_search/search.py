@@ -16,17 +16,43 @@ import tritonclient.http as httpclient
 from transformers import AutoTokenizer
 
 
+# Model configurations
+MODELS = {
+    'minilm': {
+        'triton_name': 'all-minilm-l6-v2',
+        'tokenizer': 'sentence-transformers/all-MiniLM-L6-v2',
+        'dims': 384,
+        'table': 'code_embeddings',
+        'query_prefix': '',  # No prefix needed
+    },
+    'e5': {
+        'triton_name': 'e5-large-v2',
+        'tokenizer': 'intfloat/e5-large-v2',
+        'dims': 1024,
+        'table': 'code_embeddings_e5',
+        'query_prefix': 'query: ',  # e5 uses query prefix for search
+    }
+}
+
+
 class CodeSearch:
     """Semantic search over indexed code"""
 
-    def __init__(self, db_url: str, triton_url: str = "localhost:8020"):
+    def __init__(self, db_url: str, triton_url: str = "localhost:8020", model: str = "minilm"):
         self.conn = psycopg2.connect(db_url)
         self.client = httpclient.InferenceServerClient(url=triton_url)
-        self.tokenizer = AutoTokenizer.from_pretrained("sentence-transformers/all-MiniLM-L6-v2")
-        self.model_name = "all-minilm-l6-v2"
+        self.config = MODELS[model]
+        self.tokenizer = AutoTokenizer.from_pretrained(self.config['tokenizer'])
+        self.model_name = self.config['triton_name']
+        self.table_name = self.config['table']
+        self.query_prefix = self.config['query_prefix']
 
     def embed(self, text: str) -> np.ndarray:
         """Generate embedding for query"""
+        # Add prefix if model requires it (e.g., e5 uses "query: " for search)
+        if self.query_prefix:
+            text = self.query_prefix + text
+
         encoded = self.tokenizer(
             [text],
             padding=True,
@@ -106,7 +132,7 @@ class CodeSearch:
                 end_line,
                 language,
                 1 - (embedding <=> %s::vector) AS similarity
-            FROM code_embeddings
+            FROM {self.table_name}
             {where_clause}
             ORDER BY embedding <=> %s::vector
             LIMIT %s
@@ -180,13 +206,16 @@ def main():
     parser.add_argument("--type", choices=['function', 'class', 'file'], help="Filter by chunk type")
     parser.add_argument("--limit", type=int, default=5, help="Number of results")
     parser.add_argument("--no-content", action="store_true", help="Don't show code content")
+    parser.add_argument("--model", choices=['minilm', 'e5'], default="minilm",
+                        help="Embedding model: minilm (384d, fast) or e5 (1024d, quality)")
 
     args = parser.parse_args()
 
-    print(f"🔍 Searching: \"{args.query}\"")
+    model_info = MODELS[args.model]
+    print(f"🔍 Searching: \"{args.query}\" [{args.model}]")
     print()
 
-    search = CodeSearch(args.db_url, args.triton_url)
+    search = CodeSearch(args.db_url, args.triton_url, model=args.model)
 
     results = search.search(
         query=args.query,

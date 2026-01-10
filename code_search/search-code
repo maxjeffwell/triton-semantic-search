@@ -1,6 +1,6 @@
 #!/bin/bash
 # Semantic code search across all indexed repositories
-# Usage: search-code "your query" [--repo name] [--limit N]
+# Usage: search-code "your query" [--repo name] [--limit N] [--model minilm|e5]
 
 SOURCE="${BASH_SOURCE[0]}"
 while [ -L "$SOURCE" ]; do

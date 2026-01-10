@@ -11,6 +11,9 @@ venv/
 
 # Model files (large, download separately)
 models/all-minilm-l6-v2/1/model.onnx
+models/e5-large-v2/1/model.onnx
+models/e5-large-v2/1/*.json
+models/e5-large-v2/1/vocab.txt
 
 # IDE
 .vscode/

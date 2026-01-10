@@ -70,16 +70,41 @@ class CodeChunk:
             return f"{self.file_path}: {self.content[:500]}"
 
 
+# Model configurations
+MODELS = {
+    'minilm': {
+        'triton_name': 'all-minilm-l6-v2',
+        'tokenizer': 'sentence-transformers/all-MiniLM-L6-v2',
+        'dims': 384,
+        'table': 'code_embeddings',
+        'prefix': '',  # No prefix needed
+    },
+    'e5': {
+        'triton_name': 'e5-large-v2',
+        'tokenizer': 'intfloat/e5-large-v2',
+        'dims': 1024,
+        'table': 'code_embeddings_e5',
+        'prefix': 'passage: ',  # e5 uses passage prefix for documents
+    }
+}
+
+
 class TritonEmbedder:
     """Generate embeddings using Triton server"""
 
-    def __init__(self, triton_url: str = "localhost:8020"):
+    def __init__(self, triton_url: str = "localhost:8020", model: str = "minilm"):
         self.client = httpclient.InferenceServerClient(url=triton_url)
-        self.tokenizer = AutoTokenizer.from_pretrained("sentence-transformers/all-MiniLM-L6-v2")
-        self.model_name = "all-minilm-l6-v2"
+        self.config = MODELS[model]
+        self.tokenizer = AutoTokenizer.from_pretrained(self.config['tokenizer'])
+        self.model_name = self.config['triton_name']
+        self.prefix = self.config['prefix']
 
     def embed_batch(self, texts: List[str]) -> np.ndarray:
         """Generate embeddings for a batch of texts"""
+        # Add prefix if model requires it (e.g., e5 uses "passage: " for documents)
+        if self.prefix:
+            texts = [self.prefix + t for t in texts]
+
         encoded = self.tokenizer(
             texts,
             padding=True,
@@ -255,17 +280,23 @@ def scan_repository(repo_path: str) -> Generator[CodeChunk, None, None]:
 
 
 def index_repository(repo_path: str, repo_name: str, db_url: str,
-                     triton_url: str = "localhost:8020", batch_size: int = 16):
+                     triton_url: str = "localhost:8020", batch_size: int = 16,
+                     model: str = "minilm"):
     """Index a repository into PostgreSQL"""
+
+    model_config = MODELS[model]
+    table_name = model_config['table']
 
     print(f"Indexing repository: {repo_name}")
     print(f"Path: {repo_path}")
+    print(f"Model: {model} ({model_config['dims']} dims)")
+    print(f"Table: {table_name}")
     print(f"Database: {db_url.split('@')[1] if '@' in db_url else db_url}")
     print()
 
     # Initialize embedder
-    embedder = TritonEmbedder(triton_url)
-    print("[OK] Connected to Triton server")
+    embedder = TritonEmbedder(triton_url, model=model)
+    print(f"[OK] Connected to Triton server ({model_config['triton_name']})")
 
     # Connect to database
     conn = psycopg2.connect(db_url)
@@ -304,8 +335,8 @@ def index_repository(repo_path: str, repo_name: str, db_url: str,
         # Insert into database
         execute_values(
             cur,
-            """
-            INSERT INTO code_embeddings
+            f"""
+            INSERT INTO {table_name}
             (repo_name, file_path, chunk_type, name, content, start_line, end_line, embedding, language)
             VALUES %s
             ON CONFLICT (repo_name, file_path, chunk_type, name, start_line)
@@ -335,6 +366,8 @@ def main():
     parser.add_argument("--db-url", required=True, help="PostgreSQL connection URL")
     parser.add_argument("--triton-url", default="localhost:8020", help="Triton server URL")
     parser.add_argument("--batch-size", type=int, default=16, help="Batch size for embedding")
+    parser.add_argument("--model", choices=['minilm', 'e5'], default="minilm",
+                        help="Embedding model: minilm (384d, fast) or e5 (1024d, quality)")
 
     args = parser.parse_args()
 
@@ -345,7 +378,8 @@ def main():
         repo_name=repo_name,
         db_url=args.db_url,
         triton_url=args.triton_url,
-        batch_size=args.batch_size
+        batch_size=args.batch_size,
+        model=args.model
     )
 
 
