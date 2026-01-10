@@ -1,0 +1,39 @@
+version: '3.8'
+
+services:
+  triton:
+    image: nvcr.io/nvidia/tritonserver:24.01-py3
+    container_name: triton-semantic-search
+    ports:
+      - "8020:8000"  # HTTP (external:internal)
+      - "8021:8001"  # gRPC
+      - "8022:8002"  # Metrics
+    volumes:
+      - ./models:/models
+    command: tritonserver --model-repository=/models --log-verbose=1
+    runtime: nvidia
+    environment:
+      - NVIDIA_VISIBLE_DEVICES=GPU-8060da56-7daf-3ffb-07ad-102325b750f5  # GTX 1080 UUID
+    # Health check
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/v2/health/ready"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 120s  # TensorRT compilation takes time
+    restart: unless-stopped
+
+  # Optional: Triton client for testing
+  client:
+    image: nvcr.io/nvidia/tritonserver:24.01-py3-sdk
+    container_name: triton-client
+    depends_on:
+      triton:
+        condition: service_healthy
+    volumes:
+      - ./client:/workspace
+    working_dir: /workspace
+    network_mode: host
+    profiles:
+      - test  # Only starts with: docker-compose --profile test up
+    command: sleep infinity

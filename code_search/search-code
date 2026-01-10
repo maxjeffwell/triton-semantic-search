@@ -1,0 +1,56 @@
+#!/bin/bash
+# Semantic code search across all indexed repositories
+# Usage: search-code "your query" [--repo name] [--limit N]
+
+SOURCE="${BASH_SOURCE[0]}"
+while [ -L "$SOURCE" ]; do
+  DIR="$(cd "$(dirname "$SOURCE")" && pwd)"
+  SOURCE="$(readlink "$SOURCE")"
+  [[ $SOURCE != /* ]] && SOURCE="$DIR/$SOURCE"
+done
+SCRIPT_DIR="$(cd "$(dirname "$SOURCE")" && pwd)"
+
+# Load environment variables
+if [[ -f "$SCRIPT_DIR/.env" ]]; then
+    export $(grep -v '^#' "$SCRIPT_DIR/.env" | xargs)
+fi
+
+VPS_URL="${VPS_DB_URL:-postgresql://user:pass@localhost:5433/db}"
+NEON_URL="${NEON_DB_URL:-}"
+TRITON_URL="${TRITON_URL:-localhost:8020}"
+CF_HOSTNAME="${CLOUDFLARE_HOSTNAME:-}"
+
+# Check if Triton is running
+if ! curl -s "http://$TRITON_URL/v2/health/ready" >/dev/null 2>&1; then
+    echo "Error: Triton server not running. Start it with:"
+    echo "  cd ~/GitHub_Projects/triton-semantic-search && docker compose up -d"
+    exit 1
+fi
+
+cd "$SCRIPT_DIR"
+source .venv/bin/activate 2>/dev/null || true
+
+# Try VPS first (via tunnel)
+if nc -z localhost 5433 2>/dev/null; then
+    echo "[VPS]"
+    python3 search.py "$@" --db-url "$VPS_URL" --triton-url "$TRITON_URL"
+else
+    # Try starting tunnel
+    if [[ -n "$CF_HOSTNAME" ]]; then
+        echo "VPS tunnel not running, trying to start..."
+        cloudflared access tcp --hostname "$CF_HOSTNAME" --url localhost:5433 &>/dev/null &
+        sleep 2
+    fi
+
+    if nc -z localhost 5433 2>/dev/null; then
+        echo "[VPS]"
+        python3 search.py "$@" --db-url "$VPS_URL" --triton-url "$TRITON_URL"
+    elif [[ -n "$NEON_URL" ]]; then
+        # Fallback to Neon
+        echo "[Neon - fallback]"
+        python3 search.py "$@" --db-url "$NEON_URL" --triton-url "$TRITON_URL"
+    else
+        echo "Error: No database available"
+        exit 1
+    fi
+fi

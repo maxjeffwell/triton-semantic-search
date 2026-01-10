@@ -1,0 +1,21 @@
+# Environment files with secrets
+.env
+code_search/.env
+
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+
+# Model files (large, download separately)
+models/all-minilm-l6-v2/1/model.onnx
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
+Thumbs.db
