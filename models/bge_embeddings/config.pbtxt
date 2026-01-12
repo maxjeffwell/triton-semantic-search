@@ -1,0 +1,34 @@
+name: "bge_embeddings"
+backend: "python"
+max_batch_size: 32
+
+input [
+  {
+    name: "text"
+    data_type: TYPE_STRING
+    dims: [ 1 ]
+  }
+]
+
+output [
+  {
+    name: "embeddings"
+    data_type: TYPE_FP32
+    dims: [ 768 ]
+  }
+]
+
+# GPU instance - Docker exposes only GTX 1080, which becomes GPU 0 inside container
+instance_group [
+  {
+    count: 1
+    kind: KIND_GPU
+    gpus: [ 0 ]
+  }
+]
+
+# Dynamic batching for efficiency
+dynamic_batching {
+  preferred_batch_size: [ 4, 8, 16 ]
+  max_queue_delay_microseconds: 50000
+}
