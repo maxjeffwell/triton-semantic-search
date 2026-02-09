@@ -1,7 +1,7 @@
 """
-BGE Embeddings Model for Triton Python Backend
+Arctic-Embed-M v2.0 for Triton Python Backend
 
-Loads the ONNX-exported bge-base-en-v1.5 model and provides
+Loads the ONNX-exported snowflake-arctic-embed-m-v2.0 model and provides
 sentence embeddings via Triton's Python backend.
 
 Input: text strings
@@ -17,7 +17,7 @@ import triton_python_backend_utils as pb_utils
 
 
 class TritonPythonModel:
-    """Triton Python backend for BGE embeddings"""
+    """Triton Python backend for Arctic-Embed-M v2.0 embeddings"""
 
     def initialize(self, args):
         """Load ONNX model and tokenizer"""
@@ -30,7 +30,7 @@ class TritonPythonModel:
         version = args['model_version']
         model_path = model_dir / version
 
-        self.logger.log_info(f"Loading BGE embeddings from {model_path}")
+        self.logger.log_info(f"Loading Arctic-Embed-M v2.0 from {model_path}")
 
         # Import dependencies
         try:
@@ -48,36 +48,13 @@ class TritonPythonModel:
         available_providers = ort.get_available_providers()
         self.logger.log_info(f"Available ONNX providers: {available_providers}")
 
-        # TensorRT cache directory for compiled engines
-        trt_cache_path = str(model_path / "trt_cache")
-        os.makedirs(trt_cache_path, exist_ok=True)
-
         # GPU device ID (GTX 1080 is device 0 inside container since we use device_ids: ['1'])
         gpu_device_id = 0
         self.logger.log_info(f"Using GPU device: {gpu_device_id}")
 
-        # Provider priority: TensorRT > CUDA > CPU
-        # Configure with optimization options for best performance
+        # Provider priority: CUDA > CPU
+        # (TensorRT skipped — pip ORT's TRT provider conflicts with container's TRT)
         providers = []
-
-        if 'TensorrtExecutionProvider' in available_providers:
-            trt_options = {
-                'device_id': gpu_device_id,
-                # FP16 precision - ~2x speedup on GTX 1080 (Pascal supports FP16)
-                'trt_fp16_enable': True,
-                # Workspace memory for TensorRT optimization algorithms (2GB)
-                'trt_max_workspace_size': 2 * 1024 * 1024 * 1024,
-                # Cache compiled TensorRT engines to avoid rebuild on restart
-                'trt_engine_cache_enable': True,
-                'trt_engine_cache_path': trt_cache_path,
-                # Optimization level: 3 balances build time vs inference speed
-                'trt_builder_optimization_level': 3,
-                # Timing cache for faster engine building
-                'trt_timing_cache_enable': True,
-                'trt_timing_cache_path': trt_cache_path,
-            }
-            providers.append(('TensorrtExecutionProvider', trt_options))
-            self.logger.log_info(f"TensorRT enabled with FP16, cache at {trt_cache_path}")
 
         if 'CUDAExecutionProvider' in available_providers:
             cuda_options = {
@@ -125,7 +102,7 @@ class TritonPythonModel:
                     decoded_texts,
                     padding=True,
                     truncation=True,
-                    max_length=512,
+                    max_length=8192,
                     return_tensors="np"
                 )
 
@@ -174,6 +151,6 @@ class TritonPythonModel:
 
     def finalize(self):
         """Cleanup"""
-        self.logger.log_info("BGE embeddings model finalized")
+        self.logger.log_info("Arctic-Embed-M v2.0 model finalized")
         del self.session
         del self.tokenizer

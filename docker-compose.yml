@@ -1,8 +1,7 @@
-version: '3.8'
-
 services:
   triton:
-    image: nvcr.io/nvidia/tritonserver:24.01-py3
+    build: .
+    image: triton-semantic-search:latest
     container_name: triton-semantic-search
     ports:
       - "8020:8000"  # HTTP (external:internal)
@@ -10,7 +9,7 @@ services:
       - "8022:8002"  # Metrics
     volumes:
       - ./models:/models
-    command: tritonserver --model-repository=/models --log-verbose=1
+    command: tritonserver --model-repository=/models --exit-on-error=false --log-verbose=1
     runtime: nvidia
     environment:
       - NVIDIA_VISIBLE_DEVICES=GPU-8060da56-7daf-3ffb-07ad-102325b750f5  # GTX 1080 UUID
