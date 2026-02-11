@@ -1,0 +1,20 @@
+name: "interval_ai"
+platform: "onnxruntime_onnx"
+max_batch_size: 8
+input [
+  {
+    name: "dense_input"
+    data_type: TYPE_FP32
+    dims: [ 51 ]
+  }
+]
+output [
+  {
+    name: "output_0"
+    data_type: TYPE_FP32
+    dims: [ 1 ]
+  }
+]
+response_cache {
+  enable: true
+}
