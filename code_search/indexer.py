@@ -3,22 +3,26 @@
 Code Indexer for Semantic Search
 
 Indexes code repositories into PostgreSQL with pgvector embeddings.
-Uses local Triton server for fast GPU-accelerated embedding generation.
+
+Default model "e5" is embedded by the in-cluster OVMS (Intel iGPU, e5-large,
+1024 d). "minilm" is the legacy 384-d index that needs the retired Triton server.
 
 Usage:
     python indexer.py /path/to/repo --db-url postgresql://user:pass@host:5432/db
+    python indexer.py /path/to/repo --db-url ... --replace   # drop this repo's rows first
 """
 
 import os
 import re
 import argparse
+import subprocess
 from pathlib import Path
 from typing import List, Generator
 import numpy as np
 import psycopg2
 from psycopg2.extras import execute_values
-import tritonclient.http as httpclient
-from transformers import AutoTokenizer
+
+from ovms_embed import OvmsEmbedder, DEFAULT_OVMS_URL
 
 
 # File extensions to index by language
@@ -80,19 +84,24 @@ MODELS = {
         'prefix': '',  # No prefix needed
     },
     'e5': {
-        'triton_name': 'e5-large-v2',
-        'tokenizer': 'intfloat/e5-large-v2',
+        'backend': 'ovms',
+        'ovms_model': 'e5-large',  # OVMS on the Intel iGPU (2026-10-01; was Triton e5-large-v2)
         'dims': 1024,
         'table': 'code_embeddings_e5',
         'prefix': 'passage: ',  # e5 uses passage prefix for documents
     }
 }
+MODELS['minilm']['backend'] = 'triton'  # legacy: Triton was retired 2026-09-30
 
 
 class TritonEmbedder:
     """Generate embeddings using Triton server"""
 
     def __init__(self, triton_url: str = "localhost:8020", model: str = "minilm"):
+        # Imported lazily: only the legacy minilm index needs Triton.
+        import tritonclient.http as httpclient
+        from transformers import AutoTokenizer
+        self.httpclient = httpclient
         self.client = httpclient.InferenceServerClient(url=triton_url)
         self.config = MODELS[model]
         self.tokenizer = AutoTokenizer.from_pretrained(self.config['tokenizer'])
@@ -113,15 +122,15 @@ class TritonEmbedder:
             return_tensors="np"
         )
 
-        input_ids = httpclient.InferInput("input_ids", encoded["input_ids"].shape, "INT64")
-        attention_mask = httpclient.InferInput("attention_mask", encoded["attention_mask"].shape, "INT64")
-        token_type_ids = httpclient.InferInput("token_type_ids", encoded["input_ids"].shape, "INT64")
+        input_ids = self.httpclient.InferInput("input_ids", encoded["input_ids"].shape, "INT64")
+        attention_mask = self.httpclient.InferInput("attention_mask", encoded["attention_mask"].shape, "INT64")
+        token_type_ids = self.httpclient.InferInput("token_type_ids", encoded["input_ids"].shape, "INT64")
 
         input_ids.set_data_from_numpy(encoded["input_ids"].astype(np.int64))
         attention_mask.set_data_from_numpy(encoded["attention_mask"].astype(np.int64))
         token_type_ids.set_data_from_numpy(np.zeros_like(encoded["input_ids"], dtype=np.int64))
 
-        output = httpclient.InferRequestedOutput("last_hidden_state")
+        output = self.httpclient.InferRequestedOutput("last_hidden_state")
 
         response = self.client.infer(
             model_name=self.model_name,
@@ -244,14 +253,34 @@ def extract_chunks(content: str, file_path: str, language: str) -> List[CodeChun
     )]
 
 
+def iter_repo_files(repo_path: Path) -> Generator[Path, None, None]:
+    """Tracked files via git (skips node_modules/build output, follows submodules).
+    Falls back to a pruned os.walk outside git. rglob('*') used to descend into
+    node_modules, which is why several repos had been excluded from indexing."""
+    if (repo_path / '.git').exists():
+        try:
+            out = subprocess.run(
+                ['git', '-C', str(repo_path), 'ls-files', '-z', '--recurse-submodules'],
+                check=True, capture_output=True
+            ).stdout.decode('utf-8', errors='ignore')
+            for rel in filter(None, out.split('\0')):
+                p = repo_path / rel
+                if p.is_file():
+                    yield p
+            return
+        except (subprocess.CalledProcessError, FileNotFoundError):
+            pass
+    for root, dirs, files in os.walk(repo_path):
+        dirs[:] = [d for d in dirs if d not in SKIP_DIRS]
+        for f in files:
+            yield Path(root) / f
+
+
 def scan_repository(repo_path: str) -> Generator[CodeChunk, None, None]:
     """Scan a repository and yield code chunks"""
     repo_path = Path(repo_path)
 
-    for file_path in repo_path.rglob('*'):
-        # Skip directories
-        if file_path.is_dir():
-            continue
+    for file_path in iter_repo_files(repo_path):
 
         # Skip ignored directories
         if any(skip in file_path.parts for skip in SKIP_DIRS):
@@ -281,7 +310,8 @@ def scan_repository(repo_path: str) -> Generator[CodeChunk, None, None]:
 
 def index_repository(repo_path: str, repo_name: str, db_url: str,
                      triton_url: str = "localhost:8020", batch_size: int = 16,
-                     model: str = "minilm"):
+                     model: str = "e5", ovms_url: str = DEFAULT_OVMS_URL,
+                     replace: bool = False):
     """Index a repository into PostgreSQL"""
 
     model_config = MODELS[model]
@@ -295,8 +325,13 @@ def index_repository(repo_path: str, repo_name: str, db_url: str,
     print()
 
     # Initialize embedder
-    embedder = TritonEmbedder(triton_url, model=model)
-    print(f"[OK] Connected to Triton server ({model_config['triton_name']})")
+    if model_config['backend'] == 'ovms':
+        embedder = OvmsEmbedder(ovms_url, model=model_config['ovms_model'],
+                                prefix=model_config['prefix'], dims=model_config['dims'])
+        print(f"[OK] Using OVMS {ovms_url} ({model_config['ovms_model']})")
+    else:
+        embedder = TritonEmbedder(triton_url, model=model)
+        print(f"[OK] Connected to Triton server ({model_config['triton_name']})")
 
     # Connect to database
     conn = psycopg2.connect(db_url)
@@ -307,6 +342,13 @@ def index_repository(repo_path: str, repo_name: str, db_url: str,
     # Collect chunks
     chunks = list(scan_repository(repo_path))
     print(f"Found {len(chunks)} code chunks to index")
+
+    # --replace: drop this repo's rows in the SAME transaction as the inserts, so
+    # deleted files/functions and vectors from an older model don't linger, and a
+    # failed run rolls back to the previous index instead of leaving it half-empty.
+    if replace:
+        cur.execute(f"DELETE FROM {table_name} WHERE repo_name = %s", (repo_name,))
+        print(f"Replacing: removed {cur.rowcount} existing rows for {repo_name}")
 
     # Process in batches
     indexed = 0
@@ -349,10 +391,12 @@ def index_repository(repo_path: str, repo_name: str, db_url: str,
             template="(%s, %s, %s, %s, %s, %s, %s, %s::vector, %s)"
         )
 
-        conn.commit()
+        if not replace:
+            conn.commit()
         indexed += len(batch)
         print(f"Indexed {indexed}/{len(chunks)} chunks", end='\r')
 
+    conn.commit()
     print(f"\nDone! Indexed {indexed} chunks from {repo_name}")
 
     cur.close()
@@ -366,8 +410,11 @@ def main():
     parser.add_argument("--db-url", required=True, help="PostgreSQL connection URL")
     parser.add_argument("--triton-url", default="localhost:8020", help="Triton server URL")
     parser.add_argument("--batch-size", type=int, default=16, help="Batch size for embedding")
-    parser.add_argument("--model", choices=['minilm', 'e5'], default="minilm",
-                        help="Embedding model: minilm (384d, fast) or e5 (1024d, quality)")
+    parser.add_argument("--model", choices=['minilm', 'e5'], default="e5",
+                        help="Embedding model: e5 (1024d, OVMS, default) or minilm (384d, legacy Triton)")
+    parser.add_argument("--ovms-url", default=DEFAULT_OVMS_URL, help="Embedding endpoint: gateway /api/ai/embed (default) or an OVMS base URL (env EMBED_URL)")
+    parser.add_argument("--replace", action="store_true",
+                        help="Delete this repo's existing rows first (same transaction)")
 
     args = parser.parse_args()
 
@@ -379,7 +426,9 @@ def main():
         db_url=args.db_url,
         triton_url=args.triton_url,
         batch_size=args.batch_size,
-        model=args.model
+        model=args.model,
+        ovms_url=args.ovms_url,
+        replace=args.replace
     )
 
 

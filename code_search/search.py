@@ -12,8 +12,8 @@ Usage:
 import argparse
 import numpy as np
 import psycopg2
-import tritonclient.http as httpclient
-from transformers import AutoTokenizer
+
+from ovms_embed import OvmsEmbedder, DEFAULT_OVMS_URL
 
 
 # Model configurations
@@ -26,29 +26,42 @@ MODELS = {
         'query_prefix': '',  # No prefix needed
     },
     'e5': {
-        'triton_name': 'e5-large-v2',
-        'tokenizer': 'intfloat/e5-large-v2',
+        'backend': 'ovms',
+        'ovms_model': 'e5-large',  # OVMS on the Intel iGPU (2026-10-01; was Triton e5-large-v2)
         'dims': 1024,
         'table': 'code_embeddings_e5',
         'query_prefix': 'query: ',  # e5 uses query prefix for search
     }
 }
+MODELS['minilm']['backend'] = 'triton'  # legacy: Triton was retired 2026-09-30
 
 
 class CodeSearch:
     """Semantic search over indexed code"""
 
-    def __init__(self, db_url: str, triton_url: str = "localhost:8020", model: str = "minilm"):
+    def __init__(self, db_url: str, triton_url: str = "localhost:8020", model: str = "e5",
+                 ovms_url: str = DEFAULT_OVMS_URL):
         self.conn = psycopg2.connect(db_url)
-        self.client = httpclient.InferenceServerClient(url=triton_url)
         self.config = MODELS[model]
-        self.tokenizer = AutoTokenizer.from_pretrained(self.config['tokenizer'])
-        self.model_name = self.config['triton_name']
         self.table_name = self.config['table']
         self.query_prefix = self.config['query_prefix']
+        self.ovms = None
+        if self.config['backend'] == 'ovms':
+            self.ovms = OvmsEmbedder(ovms_url, model=self.config['ovms_model'],
+                                     prefix=self.query_prefix, dims=self.config['dims'])
+        else:
+            # Legacy minilm path: needs the retired Triton server
+            import tritonclient.http as httpclient
+            from transformers import AutoTokenizer
+            self.httpclient = httpclient
+            self.client = httpclient.InferenceServerClient(url=triton_url)
+            self.tokenizer = AutoTokenizer.from_pretrained(self.config['tokenizer'])
+            self.model_name = self.config['triton_name']
 
     def embed(self, text: str) -> np.ndarray:
         """Generate embedding for query"""
+        if self.ovms:
+            return self.ovms.embed(text)
         # Add prefix if model requires it (e.g., e5 uses "query: " for search)
         if self.query_prefix:
             text = self.query_prefix + text
@@ -61,15 +74,15 @@ class CodeSearch:
             return_tensors="np"
         )
 
-        input_ids = httpclient.InferInput("input_ids", encoded["input_ids"].shape, "INT64")
-        attention_mask = httpclient.InferInput("attention_mask", encoded["attention_mask"].shape, "INT64")
-        token_type_ids = httpclient.InferInput("token_type_ids", encoded["input_ids"].shape, "INT64")
+        input_ids = self.httpclient.InferInput("input_ids", encoded["input_ids"].shape, "INT64")
+        attention_mask = self.httpclient.InferInput("attention_mask", encoded["attention_mask"].shape, "INT64")
+        token_type_ids = self.httpclient.InferInput("token_type_ids", encoded["input_ids"].shape, "INT64")
 
         input_ids.set_data_from_numpy(encoded["input_ids"].astype(np.int64))
         attention_mask.set_data_from_numpy(encoded["attention_mask"].astype(np.int64))
         token_type_ids.set_data_from_numpy(np.zeros_like(encoded["input_ids"], dtype=np.int64))
 
-        output = httpclient.InferRequestedOutput("last_hidden_state")
+        output = self.httpclient.InferRequestedOutput("last_hidden_state")
 
         response = self.client.infer(
             model_name=self.model_name,
@@ -206,8 +219,9 @@ def main():
     parser.add_argument("--type", choices=['function', 'class', 'file'], help="Filter by chunk type")
     parser.add_argument("--limit", type=int, default=5, help="Number of results")
     parser.add_argument("--no-content", action="store_true", help="Don't show code content")
-    parser.add_argument("--model", choices=['minilm', 'e5'], default="minilm",
-                        help="Embedding model: minilm (384d, fast) or e5 (1024d, quality)")
+    parser.add_argument("--model", choices=['minilm', 'e5'], default="e5",
+                        help="Embedding model: e5 (1024d, OVMS, default) or minilm (384d, legacy Triton)")
+    parser.add_argument("--ovms-url", default=DEFAULT_OVMS_URL, help="Embedding endpoint: gateway /api/ai/embed (default) or an OVMS base URL (env EMBED_URL)")
 
     args = parser.parse_args()
 
@@ -215,7 +229,7 @@ def main():
     print(f"🔍 Searching: \"{args.query}\" [{args.model}]")
     print()
 
-    search = CodeSearch(args.db_url, args.triton_url, model=args.model)
+    search = CodeSearch(args.db_url, args.triton_url, model=args.model, ovms_url=args.ovms_url)
 
     results = search.search(
         query=args.query,
