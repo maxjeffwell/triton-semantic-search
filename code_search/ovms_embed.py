@@ -44,13 +44,14 @@ class OvmsEmbedder:
         payload = json.dumps(body_obj).encode("utf-8")
         # Cloudflare (in front of ai-gateway.el-jefe.me) answers error 1010 / 403 to
         # Python's default "Python-urllib" user agent: always send our own.
-        req = urllib.request.Request(
-            self.url, data=payload, method="POST",
-            headers={
-                "Content-Type": "application/json",
-                "User-Agent": "code-search-indexer/1.0 (+https://github.com/maxjeffwell/triton-semantic-search)",
-            },
-        )
+        headers = {
+            "Content-Type": "application/json",
+            "User-Agent": "code-search-indexer/1.0 (+https://github.com/maxjeffwell/triton-semantic-search)",
+        }
+        # The gateway's public endpoint requires a client key (since 2026-11-09).
+        if self.gateway and os.environ.get("AI_GATEWAY_KEY"):
+            headers["X-API-Key"] = os.environ["AI_GATEWAY_KEY"]
+        req = urllib.request.Request(self.url, data=payload, method="POST", headers=headers)
         with urllib.request.urlopen(req, timeout=self.timeout) as resp:
             body = json.loads(resp.read())
 
